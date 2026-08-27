@@ -1,6 +1,6 @@
 """Numerical kernels exposed to Python through a small C ABI."""
 
-from std.algorithm import parallelize
+from std.algorithm import map
 from std.math import exp, pow, sqrt
 from std.sys.info import simd_width_of
 
@@ -12,6 +12,12 @@ comptime PARALLEL_THRESHOLD = 65536
 
 def p(addr: Int) -> Ptr:
     return Ptr(unsafe_from_address=addr)
+
+
+@export("KGEN_CompilerRT_AsyncRT_GetOrCreateCPUDevice")
+def initialize_cpu_runtime() abi("C") -> Int:
+    """Keep the legacy loader contract after AsyncRT left the Mojo stdlib."""
+    return 1
 
 
 def normalize_memberships_simd(
@@ -56,7 +62,7 @@ def normalize_memberships(u: Ptr, um: Ptr, clusters: Int, samples: Int, m: Float
         var u_addr = Int(u)
         var um_addr = Int(um)
 
-        @parameter
+        @__parameter
         def work(task: Int):
             var start = task * blocks // PARALLEL_TASKS
             var end = (task + 1) * blocks // PARALLEL_TASKS
@@ -64,7 +70,7 @@ def normalize_memberships(u: Ptr, um: Ptr, clusters: Int, samples: Int, m: Float
                 p(u_addr), p(um_addr), clusters, samples, m, start, end
             )
 
-        parallelize[work](PARALLEL_TASKS)
+        map[work](PARALLEL_TASKS)
     else:
         normalize_memberships_simd(u, um, clusters, samples, m, 0, blocks)
     normalize_memberships_tail(u, um, clusters, samples, m, blocks * W)
@@ -114,7 +120,7 @@ def compute_centers(
         var centers_addr = Int(centers)
         var um_addr = Int(um)
 
-        @parameter
+        @__parameter
         def work(task: Int):
             var start = task * clusters // tasks
             var end = (task + 1) * clusters // tasks
@@ -128,7 +134,7 @@ def compute_centers(
                     samples,
                 )
 
-        parallelize[work](tasks)
+        map[work](tasks)
     else:
         for k in range(clusters):
             compute_center(data, centers, um, k, features, samples)
@@ -182,7 +188,7 @@ def compute_distances(
         var centers_addr = Int(centers)
         var distances_addr = Int(distances)
 
-        @parameter
+        @__parameter
         def work(task: Int):
             var start = task * clusters // tasks
             var end = (task + 1) * clusters // tasks
@@ -196,7 +202,7 @@ def compute_distances(
                     samples,
                 )
 
-        parallelize[work](tasks)
+        map[work](tasks)
     else:
         for k in range(clusters):
             compute_distances_for_cluster(
@@ -293,7 +299,7 @@ def update_memberships(
         var u_addr = Int(u)
         var distances_addr = Int(distances)
 
-        @parameter
+        @__parameter
         def work(task: Int):
             var start = task * blocks // PARALLEL_TASKS
             var end = (task + 1) * blocks // PARALLEL_TASKS
@@ -307,7 +313,7 @@ def update_memberships(
                 end,
             )
 
-        parallelize[work](PARALLEL_TASKS)
+        map[work](PARALLEL_TASKS)
     else:
         update_memberships_simd(
             u, distances, clusters, samples, exponent, 0, blocks
@@ -518,7 +524,7 @@ def interpolate_queries(
 ):
     if queries >= PARALLEL_THRESHOLD:
 
-        @parameter
+        @__parameter
         def work(task: Int):
             var start = task * queries // PARALLEL_TASKS
             var end = (task + 1) * queries // PARALLEL_TASKS
@@ -545,7 +551,7 @@ def interpolate_queries(
                     zero_outside,
                 )
 
-        parallelize[work](PARALLEL_TASKS)
+        map[work](PARALLEL_TASKS)
     elif sorted:
         interpolate_sorted_range(
             p(x_addr),
