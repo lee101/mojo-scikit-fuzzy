@@ -110,16 +110,24 @@ def cmeans_predict(
     objective = []
 
     function = lib().msf_cmeans_predict_step
+    cached_function = lib().msf_cmeans_predict_cached_step
     convergence = lib().msf_normdiff_and_copy
     previous = u.copy() if error > 0 else None
     p = 0
     while p < maxiter:
-        objective.append(
-            function(
-                addr(values), addr(centers), addr(u), addr(distances), addr(um),
-                c, features, samples, m,
+        if p == 0:
+            objective.append(
+                function(
+                    addr(values), addr(centers), addr(u), addr(distances), addr(um),
+                    c, features, samples, m,
+                )
             )
-        )
+        else:
+            objective.append(
+                cached_function(
+                    addr(u), addr(distances), addr(um), c, samples, m,
+                )
+            )
         p += 1
         if previous is not None and convergence(
             addr(u), addr(previous), u.size

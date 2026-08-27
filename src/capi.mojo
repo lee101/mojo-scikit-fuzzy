@@ -1,6 +1,8 @@
 """Numerical kernels exposed to Python through a small C ABI."""
 
 from std.algorithm import map
+from std.gpu import global_idx
+from max.gpu.host import DeviceContext
 from std.math import exp, pow, sqrt
 from std.sys.info import simd_width_of
 
@@ -401,6 +403,24 @@ def msf_cmeans_predict_step(
     )
 
 
+@export("msf_cmeans_predict_cached_step")
+def msf_cmeans_predict_cached_step(
+    u_addr: Int,
+    distances_addr: Int,
+    um_addr: Int,
+    clusters: Int,
+    samples: Int,
+    m: Float64,
+) abi("C") -> Float64:
+    var u = p(u_addr)
+    var um = p(um_addr)
+    var distances = p(distances_addr)
+    normalize_memberships(u, um, clusters, samples, m)
+    var objective = objective_sum(um, distances, clusters * samples)
+    update_memberships(u, distances, clusters, samples, m)
+    return objective
+
+
 @export("msf_normdiff_and_copy")
 def msf_normdiff_and_copy(
     current_addr: Int, previous_addr: Int, n: Int
@@ -495,21 +515,36 @@ def interpolate_sorted_range(
                 lo = mid
             else:
                 hi = mid
-    for q in range(start, end):
+    comptime W = simd_width_of[DType.float64]()
+    var q = start
+    while q < end:
         var value = query[q]
         if value < x[0]:
             result[q] = 0.0 if zero_outside != 0 else mf[0]
+            q += 1
             continue
         if value > x[n - 1]:
             result[q] = 0.0 if zero_outside != 0 else mf[n - 1]
+            q += 1
             continue
         if value == x[n - 1]:
             result[q] = mf[n - 1]
+            q += 1
             continue
         while x[lo + 1] <= value:
             lo += 1
         var width = x[lo + 1] - x[lo]
-        result[q] = mf[lo] + (value - x[lo]) * (mf[lo + 1] - mf[lo]) / width
+        if q + W <= end and query[q + W - 1] < x[lo + 1]:
+            var values = query.load[width=W](q)
+            result.store(
+                q,
+                mf[lo]
+                + (values - x[lo]) * (mf[lo + 1] - mf[lo]) / width,
+            )
+            q += W
+        else:
+            result[q] = mf[lo] + (value - x[lo]) * (mf[lo + 1] - mf[lo]) / width
+            q += 1
 
 
 def interpolate_queries(
@@ -588,10 +623,20 @@ def msf_interp_membership(
 ) abi("C"):
     var query = p(query_addr)
     var sorted = True
-    for q in range(1, queries):
+    comptime W = simd_width_of[DType.float64]()
+    var q = 1
+    while q + W <= queries:
+        if not query.load[width=W](q).ge(
+            query.load[width=W](q - 1)
+        ).reduce_and():
+            sorted = False
+            break
+        q += W
+    while sorted and q < queries:
         if not query[q] >= query[q - 1]:
             sorted = False
             break
+        q += 1
     interpolate_queries(
         x_addr,
         mf_addr,
@@ -734,9 +779,69 @@ def msf_gaussmf(
 ) abi("C"):
     var x = p(x_addr)
     var result = p(result_addr)
-    for i in range(n):
-        var z = (x[i] - mean) / sigma
+    var inverse_sigma = 1.0 / sigma
+
+    @__parameter
+    def work(task: Int):
+        comptime W = simd_width_of[DType.float64]()
+        var tasks = PARALLEL_TASKS if n >= PARALLEL_THRESHOLD else 1
+        var start = task * n // tasks
+        var end = (task + 1) * n // tasks
+        var vector_end = end - (end - start) % W
+        for i in range(start, vector_end, W):
+            var z = (x.load[width=W](i) - mean) * inverse_sigma
+            result.store(i, exp(-0.5 * z * z))
+        for i in range(vector_end, end):
+            var z = (x[i] - mean) * inverse_sigma
+            result[i] = exp(-0.5 * z * z)
+
+    if n >= PARALLEL_THRESHOLD:
+        map[work](PARALLEL_TASKS)
+    else:
+        work(0)
+
+
+def gaussmf_gpu_kernel(
+    x: Ptr,
+    result: Ptr,
+    n: Int64,
+    mean: Float64,
+    inverse_sigma: Float64,
+):
+    var i = Int(global_idx.x)
+    if i < Int(n):
+        var z = (x[i] - mean) * inverse_sigma
         result[i] = exp(-0.5 * z * z)
+
+
+@export("msf_gaussmf_gpu")
+def msf_gaussmf_gpu(
+    x_addr: Int, result_addr: Int, n: Int, mean: Float64, sigma: Float64
+) abi("C") -> Int:
+    if n <= 0 or n > 120000000:
+        return 0
+    try:
+        with DeviceContext() as ctx:
+            if ctx.get_memory_info()[0] < UInt(4000 * 1024 * 1024):
+                return 0
+            var device_x = ctx.enqueue_create_buffer[DType.float64](n)
+            var device_result = ctx.enqueue_create_buffer[DType.float64](n)
+            ctx.enqueue_copy(device_x, p(x_addr))
+            comptime BLOCK = 256
+            ctx.enqueue_function[gaussmf_gpu_kernel](
+                device_x,
+                device_result,
+                Int64(n),
+                mean,
+                1.0 / sigma,
+                grid_dim=(n + BLOCK - 1) // BLOCK,
+                block_dim=BLOCK,
+            )
+            ctx.enqueue_copy(p(result_addr), device_result)
+            ctx.synchronize()
+            return 1
+    except:
+        return 0
 
 
 @export("msf_gbellmf")

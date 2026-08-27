@@ -95,6 +95,28 @@ def test_membership_functions_accept_empty_and_strided_inputs():
         mojofuzzy.gaussmf(np.array([1 + 2j]), 0, 1)
 
 
+def test_gaussmf_simd_tail_and_parallel_threshold():
+    x = np.linspace(-6, 6, 65_539)
+    np.testing.assert_allclose(
+        mojofuzzy.gaussmf(x, 0.3, 1.7),
+        skfuzzy.gaussmf(x, 0.3, 1.7),
+        rtol=5e-9,
+        atol=1e-10,
+    )
+
+
+def test_gaussmf_gpu_or_cpu_fallback():
+    x = np.linspace(-6, 6, 259)
+    np.testing.assert_allclose(
+        mojofuzzy.gaussmf(x, 0.3, 1.7, device="gpu"),
+        skfuzzy.gaussmf(x, 0.3, 1.7),
+        rtol=5e-9,
+        atol=1e-10,
+    )
+    with pytest.raises(ValueError):
+        mojofuzzy.gaussmf([], 0, 1, device="accelerator")
+
+
 @pytest.mark.parametrize("ordered", [True, False])
 def test_interp_membership_parallel_threshold(ordered):
     x = np.linspace(-4, 4, 1003)

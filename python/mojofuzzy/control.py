@@ -7,7 +7,7 @@ from collections import OrderedDict
 import numpy as np
 
 from ._lib import addr, f64, lib
-from .defuzzify import defuzz, interp_membership, interp_universe
+from .defuzzify import defuzz, interp_universe
 from .membership import trimf
 
 
@@ -121,9 +121,11 @@ class Rule:
 class ControlSystem:
     def __init__(self, rules=None):
         self.rules = list(rules or [])
+        self._version = 0
 
     def addrule(self, rule):
         self.rules.append(rule)
+        self._version += 1
 
     @property
     def antecedents(self):
@@ -158,7 +160,9 @@ class _InputAcceptor(dict):
         self.simulation = simulation
 
     def __setitem__(self, key, value):
-        variables = {item.label: item for item in self.simulation.ctrl.antecedents}
+        if self.simulation._ctrl_version != self.simulation.ctrl._version:
+            self.simulation._refresh_structure()
+        variables = self.simulation._input_variables
         if key not in variables:
             raise ValueError(f"Unexpected input: {key}")
         variable = variables[key]
@@ -180,6 +184,16 @@ class ControlSystemSimulation:
         self.lenient = lenient
         self.input = _InputAcceptor(self)
         self.output = OrderedDict()
+        self._ctrl_version = -1
+        self._refresh_structure()
+
+    def _refresh_structure(self):
+        self._antecedents = tuple(self.ctrl.antecedents)
+        self._consequents = tuple(self.ctrl.consequents)
+        self._input_variables = {
+            variable.label: variable for variable in self._antecedents
+        }
+        self._ctrl_version = self.ctrl._version
 
     def _truth(self, node, memberships, rule):
         if isinstance(node, Term):
@@ -191,7 +205,9 @@ class ControlSystemSimulation:
         return float(rule.and_func(left, right) if node.kind == "and" else rule.or_func(left, right))
 
     def compute(self):
-        antecedents = list(self.ctrl.antecedents)
+        if self._ctrl_version != self.ctrl._version:
+            self._refresh_structure()
+        antecedents = self._antecedents
         missing = [variable.label for variable in antecedents if variable.label not in self.input]
         if missing:
             raise ValueError("All antecedents must have input values!")
@@ -199,8 +215,8 @@ class ControlSystemSimulation:
         for variable in antecedents:
             value = self.input[variable.label]
             for label, term in variable.terms.items():
-                memberships[(variable.label, label)] = interp_membership(
-                    variable.universe, term.mf, value
+                memberships[(variable.label, label)] = float(
+                    np.interp(value, variable.universe, term.mf, left=0.0, right=0.0)
                 )
 
         cuts = {}
@@ -211,7 +227,7 @@ class ControlSystemSimulation:
                 cuts[key] = max(cuts.get(key, 0.0), strength * weighted.weight)
 
         self.output = OrderedDict()
-        for variable in self.ctrl.consequents:
+        for variable in self._consequents:
             active = [(term, cuts[(variable.label, label)])
                       for label, term in variable.terms.items()
                       if (variable.label, label) in cuts]
@@ -224,7 +240,8 @@ class ControlSystemSimulation:
                 extra.extend(interp_universe(variable.universe, term.mf, cut))
             universe = np.union1d(variable.universe, extra)
             memberships_matrix = np.vstack([
-                interp_membership(variable.universe, term.mf, universe) for term, _ in active
+                np.interp(universe, variable.universe, term.mf, left=0.0, right=0.0)
+                for term, _ in active
             ])
             strengths = f64([cut for _, cut in active])
             aggregated = np.empty(universe.size, dtype=np.float64)

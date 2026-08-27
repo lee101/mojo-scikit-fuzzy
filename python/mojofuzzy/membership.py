@@ -32,9 +32,15 @@ def trapmf(x, abcd):
     return result
 
 
-def gaussmf(x, mean, sigma):
+def gaussmf(x, mean, sigma, *, device="cpu"):
+    if device not in ("cpu", "gpu"):
+        raise ValueError("device must be 'cpu' or 'gpu'")
     values, result = _result(x)
     if values.size:
+        if device == "gpu" and lib().msf_gaussmf_gpu(
+            addr(values), addr(result), values.size, mean, sigma
+        ):
+            return result
         lib().msf_gaussmf(addr(values), addr(result), values.size, mean, sigma)
     return result
 

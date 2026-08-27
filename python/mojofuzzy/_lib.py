@@ -17,6 +17,7 @@ F = ctypes.c_double
 _SIGNATURES = {
     "msf_cmeans_step": ([I] * 8 + [F], F),
     "msf_cmeans_predict_step": ([I] * 8 + [F], F),
+    "msf_cmeans_predict_cached_step": ([I] * 5 + [F], F),
     "msf_normdiff_and_copy": ([I, I, I], F),
     "msf_fpc": ([I, I, I], F),
     "msf_interp_membership": ([I] * 7, None),
@@ -26,6 +27,7 @@ _SIGNATURES = {
     "msf_trimf": ([I, I, I, F, F, F], None),
     "msf_trapmf": ([I, I, I, F, F, F, F], None),
     "msf_gaussmf": ([I, I, I, F, F], None),
+    "msf_gaussmf_gpu": ([I, I, I, F, F], I),
     "msf_gbellmf": ([I, I, I, F, F, F], None),
     "msf_sigmf": ([I, I, I, F, F], None),
 }
@@ -60,6 +62,13 @@ def lib() -> ctypes.CDLL:
 
 
 def f64(value, *, copy: bool = False) -> np.ndarray:
+    if (
+        not copy
+        and isinstance(value, np.ndarray)
+        and value.dtype == np.float64
+        and value.flags.c_contiguous
+    ):
+        return value
     source = np.asarray(value)
     if np.issubdtype(source.dtype, np.complexfloating):
         raise TypeError("complex inputs are not supported")

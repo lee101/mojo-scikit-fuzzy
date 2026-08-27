@@ -56,6 +56,19 @@ def test_cmeans_predict_parity():
     assert actual[3].shape == expected[3].shape == (2,)
 
 
+def test_cmeans_predict_cached_distances_with_fixed_iterations():
+    data, init = dataset(samples=123)
+    centers = np.ascontiguousarray(data[:, :4].T)
+    expected = skfuzzy.cluster.cmeans_predict(
+        data, centers, 1.5, 0, 4, init=init
+    )
+    actual = mojofuzzy.cluster.cmeans_predict(
+        data, centers, 1.5, 0, 4, init=init
+    )
+    assert_result_parity(actual, expected, atol=3e-10, rtol=2e-9)
+    assert actual[4] == 4
+
+
 def test_cmeans_single_cluster():
     data, _ = dataset(samples=30)
     init = np.ones((1, 30))

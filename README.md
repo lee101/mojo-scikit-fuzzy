@@ -94,24 +94,28 @@ centers, u, u0, distances, objective, iterations, fpc = (
 
 ## Benchmarks
 
-Measured on 2026-07-29 on an Intel Xeon E5-2697 v4 at 2.30 GHz with the
-pinned Mojo `1.0.0b3.dev2026072406`, Python 3.13, and scikit-fuzzy 0.5.0.
+Measured on 2026-08-27 on an Intel Xeon E5-2697 v4 at 2.30 GHz with the
+pinned Mojo `1.1.0.dev2026081105`, Python 3.13, and scikit-fuzzy 0.5.0.
+The opt-in GPU row used the shared RTX 5090 with 14,171 MiB free before the
+run.
 Times are the best of three warmed batches. `upstream / Mojo` above 1 means
 Mojo is faster.
 
 | operation | mojo-scikit-fuzzy | scikit-fuzzy | upstream / Mojo |
 |---|---:|---:|---:|
-| cmeans, 6 clusters (8 x 20k, 15 iter) | 95.40 ms | 484.00 ms | 5.07x |
-| cmeans_predict (8 x 80k) | 59.24 ms | 201.90 ms | 3.41x |
-| centroid (1M points) | 7.17 ms | 2000.50 ms | 279.08x |
-| interp_membership (1M queries) | 2.73 ms | 9.14 ms | 3.35x |
-| gaussmf (2M points) | 24.98 ms | 50.66 ms | 2.03x |
-| Mamdani controller (250 evaluations) | 151.62 ms | 553.11 ms | 3.65x |
+| cmeans, 6 clusters (8 x 20k, 15 iter) | 58.57 ms | 497.02 ms | 8.49x |
+| cmeans_predict (8 x 80k) | 49.19 ms | 234.31 ms | 4.76x |
+| centroid (1M points) | 7.36 ms | 1800.98 ms | 244.65x |
+| interp_membership (1M queries) | 2.28 ms | 7.16 ms | 3.15x |
+| gaussmf (2M points) | 10.30 ms | 35.56 ms | 3.45x |
+| gaussmf GPU (2M points) | 8.08 ms | 28.57 ms | 3.53x |
+| Mamdani controller (250 evaluations) | 57.55 ms | 561.02 ms | 9.75x |
 
 The very large centroid result comes from replacing scikit-fuzzy's Python
 loop over adjacent trapezoids with one compiled loop. Bulk interpolation
-detects ordered queries and scans each independent chunk linearly; unordered
-queries retain binary search. Reproduce the table with:
+detects ordered queries with SIMD comparisons, scans each independent chunk
+linearly, and evaluates runs sharing a source interval in SIMD blocks;
+unordered queries retain binary search. Reproduce the table with:
 
 ```bash
 pixi run bench
@@ -136,18 +140,22 @@ Mojo. These passes use the host's compile-time `float64` SIMD width with
 scalar remainder loops. Workloads above 65,536 element-work units are split
 into independent CPU tasks; smaller inputs stay serial. Convergence norm and
 state copying are fused into one SIMD pass, avoiding per-iteration NumPy
-temporaries. The Python layer reproduces the upstream return tuple.
+temporaries. Prediction computes fixed-center distances once and reuses them
+on later iterations. The Python layer reproduces the upstream return tuple.
 
-No GPU path is included. The covered clustering distance and interpolation
-kernels perform well under two arithmetic operations per byte moved for the
-benchmarked shapes, so transfer and launch costs would dominate rather than
-accelerate them.
+Gaussian membership generation evaluates compile-time-width SIMD blocks with
+a scalar tail and uses thresholded CPU workers above 65,536 elements. Its
+transcendental work is the only covered operation with enough arithmetic
+intensity to justify a GPU path: `gaussmf(..., device="gpu")` is opt-in, keeps
+each call below 2 GB of device allocation, and silently falls back to CPU if no
+GPU is usable or less than 4,000 MiB is free. The lower-intensity clustering
+and interpolation kernels remain CPU-only.
 
-Inference interpolates crisp antecedents, evaluates the lightweight rule
-tree in Python, and sends consequent clipping and max aggregation through
-Mojo. Cut intersections are inserted into the consequent universe before
-compiled centroid or bisector integration, matching scikit-fuzzy on coarse
-universes as well as dense ones.
+Inference caches the configured rule topology, avoids repeated validation and
+FFI calls for tiny interpolation arrays, and sends consequent clipping and max
+aggregation through Mojo. Cut intersections are inserted into the consequent
+universe before compiled centroid or bisector integration, matching
+scikit-fuzzy on coarse universes as well as dense ones.
 
 ## Verification
 

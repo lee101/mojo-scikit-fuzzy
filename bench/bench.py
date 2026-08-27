@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import platform
+import subprocess
 import sys
 import time
 
@@ -102,6 +103,14 @@ def gauss_case():
     )
 
 
+def gauss_gpu_case():
+    x = np.linspace(-10, 10, 2_000_000)
+    return (
+        lambda: mojofuzzy.gaussmf(x, 0.3, 2.2, device="gpu"),
+        lambda: skfuzzy.gaussmf(x, 0.3, 2.2),
+    )
+
+
 def controller(fuzzy, ctrl):
     quality = ctrl.Antecedent(np.arange(0, 11), "quality")
     service = ctrl.Antecedent(np.arange(0, 11), "service")
@@ -139,8 +148,25 @@ CASES = [
     ("centroid (1M points)", centroid_case),
     ("interp_membership (1M queries)", interpolation_case),
     ("gaussmf (2M points)", gauss_case),
+    ("gaussmf GPU (2M points)", gauss_gpu_case),
     ("Mamdani controller (250 evaluations)", control_case),
 ]
+
+
+def gpu_memory_free_mib():
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            timeout=2,
+        )
+        return int(output.splitlines()[0].strip())
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
 
 
 def main():
@@ -149,6 +175,12 @@ def main():
     print("| operation | mojo-scikit-fuzzy | scikit-fuzzy | upstream / Mojo |")
     print("|---|---:|---:|---:|")
     for name, prepare in CASES:
+        if "GPU" in name:
+            free_mib = gpu_memory_free_mib()
+            if free_mib is None or free_mib < 4000:
+                detail = "unavailable" if free_mib is None else f"{free_mib} MiB free"
+                print(f"| {name} | skipped ({detail}) | - | - |")
+                continue
         ours, upstream = prepare()
         mojo_time = timeit(ours)
         upstream_time = timeit(upstream)
