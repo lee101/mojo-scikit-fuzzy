@@ -1,15 +1,12 @@
 """Numerical kernels exposed to Python through a small C ABI."""
 
-from std.algorithm import map
-from std.gpu import global_idx
+from max.gpu import global_idx
 from max.gpu.host import DeviceContext
 from std.math import exp, pow, sqrt
 from std.sys.info import simd_width_of
 
 comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime EPS = 2.220446049250313e-16
-comptime PARALLEL_TASKS = 16
-comptime PARALLEL_THRESHOLD = 65536
 
 
 def p(addr: Int) -> Ptr:
@@ -60,21 +57,7 @@ def normalize_memberships_tail(
 def normalize_memberships(u: Ptr, um: Ptr, clusters: Int, samples: Int, m: Float64):
     comptime W = simd_width_of[DType.float64]()
     var blocks = samples // W
-    if clusters * samples >= PARALLEL_THRESHOLD:
-        var u_addr = Int(u)
-        var um_addr = Int(um)
-
-        @__parameter
-        def work(task: Int):
-            var start = task * blocks // PARALLEL_TASKS
-            var end = (task + 1) * blocks // PARALLEL_TASKS
-            normalize_memberships_simd(
-                p(u_addr), p(um_addr), clusters, samples, m, start, end
-            )
-
-        map[work](PARALLEL_TASKS)
-    else:
-        normalize_memberships_simd(u, um, clusters, samples, m, 0, blocks)
+    normalize_memberships_simd(u, um, clusters, samples, m, 0, blocks)
     normalize_memberships_tail(u, um, clusters, samples, m, blocks * W)
 
 
@@ -116,30 +99,8 @@ def compute_centers(
     features: Int,
     samples: Int,
 ):
-    if clusters * features * samples >= PARALLEL_THRESHOLD:
-        var tasks = min(clusters, PARALLEL_TASKS)
-        var data_addr = Int(data)
-        var centers_addr = Int(centers)
-        var um_addr = Int(um)
-
-        @__parameter
-        def work(task: Int):
-            var start = task * clusters // tasks
-            var end = (task + 1) * clusters // tasks
-            for k in range(start, end):
-                compute_center(
-                    p(data_addr),
-                    p(centers_addr),
-                    p(um_addr),
-                    k,
-                    features,
-                    samples,
-                )
-
-        map[work](tasks)
-    else:
-        for k in range(clusters):
-            compute_center(data, centers, um, k, features, samples)
+    for k in range(clusters):
+        compute_center(data, centers, um, k, features, samples)
 
 
 def compute_distances_for_cluster(
@@ -184,32 +145,10 @@ def compute_distances(
     features: Int,
     samples: Int,
 ):
-    if clusters * features * samples >= PARALLEL_THRESHOLD:
-        var tasks = min(clusters, PARALLEL_TASKS)
-        var data_addr = Int(data)
-        var centers_addr = Int(centers)
-        var distances_addr = Int(distances)
-
-        @__parameter
-        def work(task: Int):
-            var start = task * clusters // tasks
-            var end = (task + 1) * clusters // tasks
-            for k in range(start, end):
-                compute_distances_for_cluster(
-                    p(data_addr),
-                    p(centers_addr),
-                    p(distances_addr),
-                    k,
-                    features,
-                    samples,
-                )
-
-        map[work](tasks)
-    else:
-        for k in range(clusters):
-            compute_distances_for_cluster(
-                data, centers, distances, k, features, samples
-            )
+    for k in range(clusters):
+        compute_distances_for_cluster(
+            data, centers, distances, k, features, samples
+        )
 
 
 def objective_sum(um: Ptr, distances: Ptr, count: Int) -> Float64:
@@ -297,29 +236,9 @@ def update_memberships(
     comptime W = simd_width_of[DType.float64]()
     var exponent = -2.0 / (m - 1.0)
     var blocks = samples // W
-    if clusters * samples >= PARALLEL_THRESHOLD:
-        var u_addr = Int(u)
-        var distances_addr = Int(distances)
-
-        @__parameter
-        def work(task: Int):
-            var start = task * blocks // PARALLEL_TASKS
-            var end = (task + 1) * blocks // PARALLEL_TASKS
-            update_memberships_simd(
-                p(u_addr),
-                p(distances_addr),
-                clusters,
-                samples,
-                exponent,
-                start,
-                end,
-            )
-
-        map[work](PARALLEL_TASKS)
-    else:
-        update_memberships_simd(
-            u, distances, clusters, samples, exponent, 0, blocks
-        )
+    update_memberships_simd(
+        u, distances, clusters, samples, exponent, 0, blocks
+    )
     update_memberships_tail(
         u, distances, clusters, samples, exponent, blocks * W
     )
@@ -557,37 +476,7 @@ def interpolate_queries(
     zero_outside: Int,
     sorted: Bool,
 ):
-    if queries >= PARALLEL_THRESHOLD:
-
-        @__parameter
-        def work(task: Int):
-            var start = task * queries // PARALLEL_TASKS
-            var end = (task + 1) * queries // PARALLEL_TASKS
-            if sorted:
-                interpolate_sorted_range(
-                    p(x_addr),
-                    p(mf_addr),
-                    p(query_addr),
-                    p(result_addr),
-                    n,
-                    start,
-                    end,
-                    zero_outside,
-                )
-            else:
-                interpolate_binary_range(
-                    p(x_addr),
-                    p(mf_addr),
-                    p(query_addr),
-                    p(result_addr),
-                    n,
-                    start,
-                    end,
-                    zero_outside,
-                )
-
-        map[work](PARALLEL_TASKS)
-    elif sorted:
+    if sorted:
         interpolate_sorted_range(
             p(x_addr),
             p(mf_addr),
@@ -773,32 +662,28 @@ def msf_trapmf(
         result[i] = value
 
 
+def gaussmf_range(
+    x: Ptr,
+    result: Ptr,
+    n: Int,
+    mean: Float64,
+    inverse_sigma: Float64,
+):
+    comptime W = simd_width_of[DType.float64]()
+    var vector_end = n - n % W
+    for i in range(0, vector_end, W):
+        var z = (x.load[width=W](i) - mean) * inverse_sigma
+        result.store(i, exp(-0.5 * z * z))
+    for i in range(vector_end, n):
+        var z = (x[i] - mean) * inverse_sigma
+        result[i] = exp(-0.5 * z * z)
+
+
 @export("msf_gaussmf")
 def msf_gaussmf(
     x_addr: Int, result_addr: Int, n: Int, mean: Float64, sigma: Float64
 ) abi("C"):
-    var x = p(x_addr)
-    var result = p(result_addr)
-    var inverse_sigma = 1.0 / sigma
-
-    @__parameter
-    def work(task: Int):
-        comptime W = simd_width_of[DType.float64]()
-        var tasks = PARALLEL_TASKS if n >= PARALLEL_THRESHOLD else 1
-        var start = task * n // tasks
-        var end = (task + 1) * n // tasks
-        var vector_end = end - (end - start) % W
-        for i in range(start, vector_end, W):
-            var z = (x.load[width=W](i) - mean) * inverse_sigma
-            result.store(i, exp(-0.5 * z * z))
-        for i in range(vector_end, end):
-            var z = (x[i] - mean) * inverse_sigma
-            result[i] = exp(-0.5 * z * z)
-
-    if n >= PARALLEL_THRESHOLD:
-        map[work](PARALLEL_TASKS)
-    else:
-        work(0)
+    gaussmf_range(p(x_addr), p(result_addr), n, mean, 1.0 / sigma)
 
 
 def gaussmf_gpu_kernel(
